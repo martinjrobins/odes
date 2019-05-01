@@ -35,7 +35,7 @@ class TestOdeint(TestCase):
         for method in ['bdf', 'admo', 'rk5', 'rk8']:
             sol = odeint(problem.f, t, problem.z0, method=method)
             assert_(problem.verify(sol.values.y, sol.values.t),
-                    msg="Method {} on Problem {}. Printout {}".format(method, 
+                    msg="Method {} on Problem {}. Printout {}".format(method,
                             problem.__class__.__name__,
                             False
                             #problem.verify(sol.values.y, sol.values.t, True)
@@ -375,6 +375,45 @@ def test_odeint_banded_jacobian():
         assert_allclose(sol1.values.y, sol4a.values.y, atol=1e-12, err_msg="sol1 != sol4a")
         assert_allclose(sol1.values.y, sol5a.values.y, atol=1e-12, err_msg="sol1 != sol5a")
         assert_allclose(sol1.values.y, sol6a.values.y, atol=1e-12, err_msg="sol1 != sol6a")
+
+c = array([[-205, 0.01, 0.00, 0.0],
+           [0.1, -2.50, 0.02, 0.0],
+           [0.00, 0.01, -2.0, 0.01],
+           [0.00, 0.00, 0.1, -1.0]])
+
+c_sparse = sparse.csr_matrix(c)
+
+def test_odeint_sparse_jacobian():
+    # Test the sparse linear solver
+
+    def func(t, y, rhs):
+        rhs[:] = c.dot(y)
+        return 0
+
+    def jac(t, y, fy, J):
+        J[:,:] = c
+        return 0
+
+    def sparse_jac(t, y, fy, J):
+        J.data = c_sparse.data
+        J.indicies = c.indicies
+        J.indptr = c.indptr
+        return 0
+
+    y0 = np.ones(4)
+    t = np.array([0, 5, 10, 100])
+
+    # Use the full Jacobian.
+    sol1 = odeint(func, t, y0,
+                         atol=1e-13, rtol=1e-11, max_steps=10000,
+                         linsolver='dense')
+
+    # Use the sparse Jacobian.
+    sol2 = odeint(func, t, y0,
+                         atol=1e-13, rtol=1e-11, max_steps=10000,
+                         jacfn=sparse_jac, nnz=c_sparse.nnz, linsolver='sparse')
+
+    assert_allclose(sol1.values.y, sol2.values.y, atol=1e-12, err_msg="sol1 != sol2")
 
 
 def test_odeint_errors():

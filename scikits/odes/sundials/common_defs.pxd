@@ -25,5 +25,9 @@ cdef inline int ndarray2nv_s(N_Vector v, np.ndarray[DTYPE_t, ndim=1] a) except? 
 
 cdef inline int SUNMatrix2ndarray(SUNMatrix m, np.ndarray a) except? -1
 cdef inline int ndarray2SUNMatrix(SUNMatrix m, np.ndarray a) except? -1
+cdef inline int csr_matrix2SUNMatrix(SUNMatrix m, np.ndarray a_data, 
+                                                  np.ndarray a_indices,
+                                                  np.ndarray a_indptr
+                                                  ) except? -1
 
 cdef ensure_numpy_float_array(object value)

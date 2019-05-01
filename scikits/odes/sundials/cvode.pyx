@@ -9,13 +9,16 @@ include "sundials_config.pxi"
 
 import numpy as np
 cimport numpy as np
+import scipy.sparse as sparse
 
 from . import (
     CVODESolveFailed, CVODESolveFoundRoot, CVODESolveReachedTSTOP,
     _get_num_args,
 )
 
-from .c_sundials cimport realtype, N_Vector
+from .c_sundials cimport (
+        realtype, N_Vector, SUNDenseLinearSolver
+)
 from .c_nvector_serial cimport *
 from .c_sunmatrix cimport *
 from .c_sunlinsol cimport *
@@ -23,6 +26,7 @@ from .c_sunlinsol cimport *
 from .c_cvode cimport *
 from .common_defs cimport (
     nv_s2ndarray, ndarray2nv_s, ndarray2SUNMatrix, DTYPE_t, INDEX_TYPE_t,
+    csr_matrix2SUNMatrix
 )
 from .common_defs import DTYPE, INDEX_TYPE
 # this is needed because we want DTYPE and INDEX_TYPE to be
@@ -281,7 +285,7 @@ cdef class CV_WrapJacRhsFunction(CV_JacRhsFunction):
             user_flag = 0
         return user_flag
 
-cdef int _jacdense(realtype tt,
+cdef int _jacfun(realtype tt,
             N_Vector yy, N_Vector ff, SUNMatrix Jac,
             void *auxiliary_data, N_Vector tmp1, N_Vector tmp2, N_Vector tmp3) except? -1:
     """function with the signature of CVDlsJacFn that calls python Jac
@@ -310,6 +314,7 @@ cdef int _jacdense(realtype tt,
         ndarray2SUNMatrix(Jac, jac_tmp)
 
     return user_flag
+
 
 # Precondioner setup funtion
 cdef class CV_PrecSetupFunction:
@@ -888,7 +893,8 @@ cdef class CVODE:
                     of 0.0 uses the solver's internal default value.
             'linsolver':
                 Values: 'dense' (= default), 'lapackdense', 'band',
-                        'lapackband', 'spgmr', 'spbcgs', 'sptfqmr'
+                        'lapackband', 'spgmr', 'spbcgs', 'sptfqmr',
+                        'sparse'
                 Description:
                     Specifies used linear solver.
                     Limitations: Linear solvers for dense and band matrices
@@ -906,6 +912,11 @@ cdef class CVODE:
                     (specially, lband = uband = 0 [that is the default]
                     denotes the band width = 1, i.e. the main diagonal only).
                     Used only if 'linsolver' is band.
+            'csr_indices', 'csr_indptr':
+                Values: numpy integer arrays, empty = default
+                Description:
+                    Specifies the layout of non-zeros in the linear system to 
+                    be solved. Used only if 'linsolver' is sparse.
             'maxl':
                 Values: 0 (= default), 1, 2, 3, 4, 5
                 Description:
@@ -1445,6 +1456,27 @@ cdef class CVODE:
                 elif flag != CVDLS_SUCCESS:
                     raise ValueError('CVDlsSetLinearSolver failed with code {}'
                                      .format(flag))
+            elif linsolver == 'sparse':
+                if len(opts['csr_indptr']) != N:
+                    raise ValueError('Number of rows different in csr_indptr and N')
+                A = SUNSparseMatrix(N, N, len(opts['csr_indices']), CSR_MAT)
+                SUNSparseMatrix_IndexValues
+                SUNSparseMatrix_IndexPointers
+                LS = SUNSparseLinearSolver(self.y0, A)
+                # check if memory was allocated
+                if (A == NULL or LS == NULL):
+                    raise ValueError('Could not allocate matrix or linear solver')
+                # attach matrix and linear solver to cvode
+                flag = CVDlsSetLinearSolver(cv_mem, LS, A)
+                if flag == CVDLS_ILL_INPUT:
+                    raise ValueError('CVSparse linear solver setting failed, '
+                                    'arguments incompatible')
+                elif flag == CVDLS_MEM_FAIL:
+                    raise MemoryError('CVSparse linear solver memory allocation error.')
+                elif flag != CVDLS_SUCCESS:
+                    raise ValueError('CVDlsSetLinearSolver failed with code {}'
+                                     .format(flag))
+                
             elif linsolver == 'band':
                 A = SUNBandMatrix(N, <int> opts['uband'], <int> opts['lband'],
                                            <int> opts['uband'] + <int> opts['lband']);
@@ -1577,7 +1609,7 @@ cdef class CVODE:
                     raise ValueError('LinSolver: Unknown solver type: %s'
                                          % opts['linsolver'])
 
-        if (linsolver in ['dense', 'lapackdense', 'lapackband', 'band']
+        if (linsolver in ['dense', 'lapackdense', 'lapackband', 'band', 'sparse']
             and self.aux_data.jac):
             # we need to create the correct shape for jacobian output, here is
             # the best place
@@ -1587,9 +1619,16 @@ cdef class CVODE:
                         np.alen(y0)
                     ), DTYPE
                 )
+
+            elif linsolver == 'sparse':
+                self.aux_data.jac_tmp = np.empty((1, ops['nnz']), DTYPE)
+
             else:
                 self.aux_data.jac_tmp = np.empty((np.alen(y0), np.alen(y0)), DTYPE)
-            CVDlsSetJacFn(cv_mem, _jacdense)
+
+        CVDlsSetJacFn(cv_mem, _jacfun)
+
+
 
         #we test if jac don't give errors due to bad coding, as
         #cvode will ignore errors, it only checks return value (0 or 1 for error)
@@ -1597,6 +1636,8 @@ cdef class CVODE:
             if linsolver == 'lapackband' or linsolver == 'band':
                 _test = np.empty((opts['uband']+opts['lband']+1, np.alen(y0)),
                         DTYPE)
+            elif linsolver == 'sparse':
+                _test = sparse.csr_matrix((np.alen(y0), np.alen(y0)), DTYPE)
             else:
                 _test = np.empty((np.alen(y0), np.alen(y0)), DTYPE)
             _fy_test = np.zeros(np.alen(y0), DTYPE)

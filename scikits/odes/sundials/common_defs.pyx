@@ -2,11 +2,12 @@
 
 import numpy as np
 cimport numpy as np
+import scipy.sparse as sparse
 import inspect
 from .c_sundials cimport (
     realtype, sunindextype, N_Vector, DlsMat, booleantype, SpfgmrMem,
     SUNMatrix, SUNMatGetID, SUNMATRIX_DENSE, SUNMATRIX_BAND, SUNMATRIX_SPARSE,
-    SUNMATRIX_CUSTOM,
+    SUNMATRIX_CUSTOM, CSR_MAT
 )
 from .c_nvector_serial cimport (
     N_VGetLength_Serial as nv_length_s, # use function not macro
@@ -16,6 +17,10 @@ from .c_sunmatrix cimport (
     SUNDenseMatrix_Rows, SUNDenseMatrix_Columns, SUNDenseMatrix_Column,
     SUNBandMatrix_Columns, SUNBandMatrix_UpperBandwidth,
     SUNBandMatrix_LowerBandwidth, SUNBandMatrix_Column,
+    SUNSparseMatrix_SparseType, SUNSparseMatrix_Columns,
+    SUNSparseMatrix_Rows, SUNSparseMatrix_NNZ, SUNSparseMatrix_NP,
+    SUNSparseMatrix_Data, SUNSparseMatrix_IndexValues, 
+    SUNSparseMatrix_IndexPointers,
 )
 
 from libc.stdio cimport stderr
@@ -151,6 +156,7 @@ cdef inline int SUNMatrix2ndarray(SUNMatrix m, np.ndarray a) except? -1:
                 a[i,j] = get_nv_ith_s(v_col, i)
 
     elif SUNMatGetID(m) == SUNMATRIX_BAND:
+        print('\tcopying sparse matrix')
         N = SUNBandMatrix_Columns(m)
         ml = SUNBandMatrix_LowerBandwidth(m)
         mu = SUNBandMatrix_UpperBandwidth(m)
@@ -159,6 +165,7 @@ cdef inline int SUNMatrix2ndarray(SUNMatrix m, np.ndarray a) except? -1:
             v_col = SUNBandMatrix_Column(m, j)
             for i in range(stride):
                 a[i,j] = v_col[i - mu]
+        print('\tfinished copying sparse matrix')
 
     else:
         raise NotImplementedError("SUNMatrix type not supported")
@@ -187,8 +194,90 @@ cdef inline int ndarray2SUNMatrix(SUNMatrix m, np.ndarray a) except? -1:
             for i in range(stride):
                 v_col[i - mu] = a[i,j]
 
+    elif SUNMatGetID(m) == SUNMATRIX_SPARSE:
+        if SUNSparseMatrix_SparseType(m) == CSR_MAT:
+
+            #The data and index_values array has NNZ entries
+            NNZ = SUNSparseMatrix_NNZ(m)
+
+            # check that we have enough memory for nonzeros
+            if len(a) > NNZ:
+                raise ValueError(
+                    "Not enough memory allocated for nonzeros in SUNMatrix"
+                    )
+
+            data = SUNSparseMatrix_Data(m)
+
+            for i in range(len(a)):
+                data[i] = a[i]
+
+        else:
+            raise NotImplementedError("SUNMatrix sparse type must be CSR_MAT")
+
     else:
         raise NotImplementedError("SUNMatrix type not supported")
+
+cdef inline int csr_matrix2SUNMatrix(SUNMatrix m, np.ndarray a_data, 
+                                                  np.ndarray a_indices,
+                                                  np.ndarray a_indptr
+                                                  ) except? -1:
+
+    """ copy a scipy.sparse csr_matrix a to a SUNMatrix m"""
+    cdef sunindextype N, M, i, j, ml, mu, stride
+    cdef nv_content_data_s v_col
+
+    cdef nv_content_data_s data 
+    cdef sunindextype *index_values
+    cdef sunindextype *index_ptrs
+
+    if SUNMatGetID(m) == SUNMATRIX_SPARSE:
+        if SUNSparseMatrix_SparseType(m) == CSR_MAT:
+
+            N = SUNSparseMatrix_Columns(m)
+            M = SUNSparseMatrix_Rows(m)
+
+            #The data and index_values array has NNZ entries
+            NNZ = SUNSparseMatrix_NNZ(m)
+
+            #The indexptrs array has NP+1 entries
+            NP = SUNSparseMatrix_NP(m)
+
+            if np.alen(a_indptr) != N + 1:
+                raise ValueError(
+                    "Number of rows mismatch. "
+                    "SUNMatrix has shape {}x{}, csr_matrix has {} rows"
+                        .format(N,M,len(a_indptr)-1) 
+                )
+
+            # should be true as long as dimensions agree
+            assert len(a_indptr) == NP + 1
+
+            # check that we have enough memory for nonzeros
+            if len(a_data) > NNZ:
+                raise ValueError(
+                    "Not enough memory allocated for nonzeros in SUNMatrix"
+                    )
+
+            assert len(a_data) == len(a_indices)
+
+            data = SUNSparseMatrix_Data(m)
+            index_values = SUNSparseMatrix_IndexValues(m)
+            index_ptrs = SUNSparseMatrix_IndexPointers(m)
+
+            for i in range(len(a_data)):
+                data[i] = a_data[i]
+                index_values[i] = a_indices[i]
+
+            for i in range(len(a_indptr)):
+                index_ptrs[i] = a_indptr[i]
+                
+        else:
+            raise NotImplementedError("SUNMatrix sparse type must be CSR_MAT")
+    else:
+        raise NotImplementedError("SUNMatrix type must be SUNMATRIX_SPARSE")
+
+
+
 
 cdef ensure_numpy_float_array(object value):
     try:
